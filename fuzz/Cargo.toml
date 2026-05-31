@@ -1,0 +1,34 @@
+# cargo-fuzz harness for `linked-queue`.
+#
+# This is a SEPARATE crate (note the `[workspace]` table that stops Cargo from
+# pulling it into the parent package) and is excluded from the published crate.
+# It requires a nightly toolchain + cargo-fuzz:
+#
+#     rustup toolchain install nightly
+#     cargo install cargo-fuzz
+#     cargo +nightly fuzz run queue_ops
+#
+[package]
+name = "linked-queue-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.linked-queue]
+path = ".."
+
+[[bin]]
+name = "queue_ops"
+path = "fuzz_targets/queue_ops.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

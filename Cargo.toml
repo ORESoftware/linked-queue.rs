@@ -1,0 +1,28 @@
+[package]
+name = "linked-queue"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "A FIFO queue backed by a doubly-linked list with a hash index, giving O(1) push/pop at both ends and O(1) lookup, insertion, and removal of arbitrary elements by key. A Rust port of @oresoftware/linked-queue."
+authors = ["ORE Software"]
+license = "MIT"
+repository = "https://github.com/ORESoftware/linked-queue.rs"
+homepage = "https://github.com/ORESoftware/linked-queue.rs"
+documentation = "https://docs.rs/linked-queue"
+readme = "readme.md"
+keywords = ["queue", "linked-list", "deque", "fifo", "lru"]
+categories = ["data-structures"]
+# The cargo-fuzz harness is dev-only infra; keep it out of the published crate.
+exclude = ["/fuzz", "/.github"]
+
+[lib]
+name = "linked_queue"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1.7.0"
+
+[badges]
+maintenance = { status = "actively-developed" }
