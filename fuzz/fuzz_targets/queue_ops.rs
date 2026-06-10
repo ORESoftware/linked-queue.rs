@@ -168,6 +168,8 @@ fn check(q: &LinkedQueue<K, V>, m: &VecDeque<(K, V)>) {
     assert_eq!(q_rev, m_rev);
     assert_eq!(q.front().map(|(k, v)| (*k, *v)), m.front().copied());
     assert_eq!(q.back().map(|(k, v)| (*k, *v)), m.back().copied());
+    // Internal structure (links, index, free-list) must agree with `len`.
+    q.assert_invariants();
 }
 
 fuzz_target!(|ops: Vec<Op>| {

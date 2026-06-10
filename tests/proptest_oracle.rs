@@ -33,6 +33,11 @@ enum Op {
     InsertAfterFront(K, V),
     /// Splice before the current back element (if any).
     InsertBeforeBack(K, V),
+    /// Splice after the element at model position `n % len` — exercises
+    /// *middle* anchors, not just the ends.
+    InsertAfterNth(usize, K, V),
+    /// Splice before the element at model position `n % len`.
+    InsertBeforeNth(usize, K, V),
     /// Overwrite a value in place via `get_mut` (must not move the element).
     GetMutSet(K, V),
     /// Read-only probe of `get` + `contains`.
@@ -66,6 +71,10 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         key.clone().prop_map(Op::MoveToFront),
         (key.clone(), any::<V>()).prop_map(|(k, v)| Op::InsertAfterFront(k, v)),
         (key.clone(), any::<V>()).prop_map(|(k, v)| Op::InsertBeforeBack(k, v)),
+        (any::<usize>(), key.clone(), any::<V>())
+            .prop_map(|(n, k, v)| Op::InsertAfterNth(n, k, v)),
+        (any::<usize>(), key.clone(), any::<V>())
+            .prop_map(|(n, k, v)| Op::InsertBeforeNth(n, k, v)),
         (key.clone(), any::<V>()).prop_map(|(k, v)| Op::GetMutSet(k, v)),
         key.prop_map(Op::Probe),
     ]
@@ -156,6 +165,32 @@ fn apply(q: &mut LinkedQueue<K, V>, m: &mut VecDeque<(K, V)>, op: Op) -> Result<
                 }
             }
         }
+        Op::InsertAfterNth(n, k, v) => {
+            if !m.is_empty() {
+                let pos = n % m.len();
+                let anchor = m[pos].0;
+                let r = q.insert_after(&anchor, k, v);
+                if model_pos(m, k).is_some() {
+                    prop_assert_eq!(r, Err(InsertError::DuplicateKey { key: k, value: v }));
+                } else {
+                    prop_assert!(r.is_ok());
+                    m.insert(pos + 1, (k, v));
+                }
+            }
+        }
+        Op::InsertBeforeNth(n, k, v) => {
+            if !m.is_empty() {
+                let pos = n % m.len();
+                let anchor = m[pos].0;
+                let r = q.insert_before(&anchor, k, v);
+                if model_pos(m, k).is_some() {
+                    prop_assert_eq!(r, Err(InsertError::DuplicateKey { key: k, value: v }));
+                } else {
+                    prop_assert!(r.is_ok());
+                    m.insert(pos, (k, v));
+                }
+            }
+        }
         Op::GetMutSet(k, v) => match q.get_mut(&k) {
             Some(slot) => {
                 *slot = v;
@@ -194,6 +229,10 @@ fn check_invariants(q: &LinkedQueue<K, V>, m: &VecDeque<(K, V)>) -> Result<(), T
 
     // ExactSizeIterator must agree with len.
     prop_assert_eq!(q.iter().len(), m.len(), "iter().len()");
+
+    // Internal structural consistency (head/tail/prev/next, index, free-list)
+    // — the part a VecDeque oracle cannot observe.
+    q.assert_invariants();
     Ok(())
 }
 

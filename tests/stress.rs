@@ -38,6 +38,8 @@ fn assert_equiv(q: &LinkedQueue<K, V>, m: &VecDeque<(K, V)>, step: u64) {
         m.back().copied(),
         "back mismatch at step {step}"
     );
+    // Internal structure must stay consistent through sustained churn.
+    q.assert_invariants();
 }
 
 #[test]
@@ -113,6 +115,12 @@ fn million_op_stress_vs_oracle() {
                     }
                 }
             }
+        }
+
+        // Periodically compact the holey, mid-churn arena so the
+        // index/link renumbering in `shrink_to_fit` is stress-tested too.
+        if step % 50_000 == 0 {
+            q.shrink_to_fit();
         }
 
         if step % VERIFY_EVERY == 0 {

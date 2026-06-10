@@ -644,6 +644,80 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
         self.iter().map(|(k, v)| f(k, v)).collect()
     }
 
+    /// Assert every internal structural invariant, panicking on any
+    /// violation. O(n).
+    ///
+    /// **Not part of the stable public API** (hence `#[doc(hidden)]`): it is
+    /// exposed only so the differential test, stress, and fuzz harnesses can
+    /// check *structural* consistency, not just observable behaviour. The
+    /// behavioural oracles compare against a `VecDeque`; this verifies the
+    /// things a `VecDeque` can't see — that `head`/`tail`/`prev`/`next`, the
+    /// hash index, and the free-list all agree with each other and with
+    /// `len`. The checks it makes:
+    ///
+    /// - `index.len() == len`, and head/tail are `NIL` exactly when empty;
+    /// - the forward walk visits exactly `len` occupied nodes with no cycle,
+    ///   every `prev` link mirrors the traversal, the head has no `prev`, the
+    ///   tail has no `next`, and every live node is indexed back to itself;
+    /// - the free-list holds only vacant, in-range slots with no duplicates;
+    /// - `free.len() + len == slots.len()` (no slot is leaked or shared).
+    #[doc(hidden)]
+    pub fn assert_invariants(&self) {
+        assert_eq!(self.index.len(), self.len, "index size != len");
+
+        if self.len == 0 {
+            assert_eq!(self.head, NIL, "non-NIL head when empty");
+            assert_eq!(self.tail, NIL, "non-NIL tail when empty");
+        } else {
+            assert_ne!(self.head, NIL, "NIL head when non-empty");
+            assert_ne!(self.tail, NIL, "NIL tail when non-empty");
+            assert_eq!(self.slots[self.head].prev, NIL, "head node has a prev");
+            assert_eq!(self.slots[self.tail].next, NIL, "tail node has a next");
+        }
+
+        // Forward walk: occupancy, link symmetry, index back-reference, no cycle.
+        let mut seen = 0usize;
+        let mut cur = self.head;
+        let mut prev = NIL;
+        while cur != NIL {
+            assert!(cur < self.slots.len(), "link index {cur} out of range");
+            let s = &self.slots[cur];
+            let key = s.key.as_ref().expect("live node is missing its key");
+            assert!(s.value.is_some(), "live node is missing its value");
+            assert_eq!(s.prev, prev, "prev link is not symmetric with next");
+            assert_eq!(
+                self.index.get(key).copied(),
+                Some(cur),
+                "index does not point back at the live node"
+            );
+            prev = cur;
+            cur = s.next;
+            seen += 1;
+            assert!(seen <= self.len, "list is longer than len (cycle?)");
+        }
+        assert_eq!(seen, self.len, "forward walk visited a different count than len");
+        assert_eq!(prev, self.tail, "forward walk did not terminate at tail");
+
+        // Free-list: vacant, in range, unique, and accounting closes.
+        let mut sorted = self.free.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), self.free.len(), "duplicate slot on the free-list");
+        for &f in &self.free {
+            assert!(f < self.slots.len(), "free index {f} out of range");
+            let s = &self.slots[f];
+            assert!(
+                s.key.is_none() && s.value.is_none(),
+                "slot {f} is on the free-list but still occupied"
+            );
+        }
+        assert_eq!(
+            self.free.len() + self.len,
+            self.slots.len(),
+            "free + len != slots (a slot was leaked or double-counted)"
+        );
+    }
+
     // ---- private helpers --------------------------------------------------
 
     fn borrow_slot(&self, idx: usize) -> Option<(&K, &V)> {
@@ -672,6 +746,14 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
     fn alloc(&mut self, key: K, value: V) -> usize {
         if let Some(idx) = self.free.pop() {
             let slot = &mut self.slots[idx];
+            // A slot on the free-list must be vacant; reusing an occupied one
+            // would leak the old (K, V) and alias two keys to one node. This
+            // is O(1), so it stays on in users' debug builds without eroding
+            // the O(1) complexity guarantee.
+            debug_assert!(
+                slot.key.is_none() && slot.value.is_none(),
+                "free-list handed out an occupied slot"
+            );
             slot.key = Some(key);
             slot.value = Some(value);
             slot.prev = NIL;
@@ -1455,6 +1537,57 @@ mod tests {
                     );
                 }
             }
+            // Structural consistency after every single op — catches
+            // free-list/index/link drift the behavioural oracle can't see.
+            q.assert_invariants();
         }
+    }
+
+    #[test]
+    fn invariants_hold_through_edge_cases() {
+        let mut q: LinkedQueue<&str, u32> = LinkedQueue::new();
+        q.assert_invariants(); // empty
+
+        // Single element, then structure-preserving moves on a 1-node list.
+        q.push_back("a", 1);
+        q.assert_invariants();
+        assert!(q.move_to_back(&"a")); // no-op on a singleton
+        q.assert_invariants();
+        assert!(q.move_to_front(&"a"));
+        q.assert_invariants();
+
+        // Anchored inserts that create a new head and a new tail.
+        q.insert_before(&"a", "head", 0).unwrap();
+        q.assert_invariants();
+        q.insert_after(&"a", "tail", 9).unwrap();
+        q.assert_invariants();
+        assert_eq!(q.to_vec(), vec![("head", 0), ("a", 1), ("tail", 9)]);
+
+        // Upsert must not change len, and structure must stay consistent.
+        let before = q.len();
+        assert_eq!(q.push_back("a", 11), Some(1));
+        assert_eq!(q.len(), before);
+        q.assert_invariants();
+
+        // Punch holes then compact; invariants must survive the renumbering.
+        q.remove(&"head");
+        q.assert_invariants();
+        q.shrink_to_fit();
+        q.assert_invariants();
+
+        // Drain to empty, then shrink the now-empty arena.
+        let _ = q.drain().collect::<Vec<_>>();
+        q.assert_invariants();
+        q.shrink_to_fit();
+        q.assert_invariants();
+        assert!(q.is_empty());
+        assert_eq!(q.capacity(), 0);
+
+        // Empty-queue operations are well-behaved and keep invariants.
+        assert_eq!(q.pop_front(), None);
+        assert_eq!(q.pop_back(), None);
+        assert_eq!(q.remove(&"a"), None);
+        assert!(!q.move_to_back(&"a"));
+        q.assert_invariants();
     }
 }
