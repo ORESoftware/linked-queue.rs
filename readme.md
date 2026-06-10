@@ -47,6 +47,7 @@ queue in constant time.
 | `remove` (by key, from anywhere)       | O(1) |
 | `insert_after` / `insert_before`       | O(1) |
 | `iter` / `retain` / `to_vec`           | O(n) |
+| `shrink_to_fit` (reclaim arena memory) | O(n) |
 
 ## Example
 

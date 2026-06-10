@@ -34,6 +34,7 @@
 //! | [`remove`] (by key, from anywhere)          | O(1)  |
 //! | [`insert_after`] / [`insert_before`]        | O(1)  |
 //! | [`iter`] / [`retain`] / [`to_vec`]          | O(n)  |
+//! | [`shrink_to_fit`] (reclaim arena memory)    | O(n)  |
 //!
 //! # Insertion semantics
 //!
@@ -96,6 +97,7 @@
 //! [`iter`]: LinkedQueue::iter
 //! [`retain`]: LinkedQueue::retain
 //! [`to_vec`]: LinkedQueue::to_vec
+//! [`shrink_to_fit`]: LinkedQueue::shrink_to_fit
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -214,13 +216,13 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
 
     /// Number of elements currently in the queue.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len
     }
 
     /// `true` if the queue holds no elements.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
@@ -234,6 +236,61 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
     pub fn reserve(&mut self, additional: usize) {
         self.slots.reserve(additional);
         self.index.reserve(additional);
+    }
+
+    /// Shrink the backing arena and index to fit the current length, reclaiming
+    /// the memory held by freed slots and spare capacity. O(n).
+    ///
+    /// The arena recycles freed slots through a free-list, so under churn it
+    /// stays bounded near the high-water mark of *simultaneously live* elements
+    /// rather than growing without bound — but it never shrinks on its own, so a
+    /// transient burst keeps its peak memory reserved for the life of the queue.
+    /// Call this after such a burst has drained (for example a per-key request
+    /// backlog that has cleared) to compact the arena back down.
+    ///
+    /// Nothing observable changes: queue order, keys, values, and every O(1)
+    /// by-key lookup are preserved. Internally the live nodes are renumbered
+    /// into a contiguous arena, so any slot indices you might have inferred are
+    /// not stable across this call (the public API never exposes them).
+    pub fn shrink_to_fit(&mut self) {
+        if self.free.is_empty() {
+            // No holes in the arena — just drop spare capacity.
+            self.slots.shrink_to_fit();
+            self.index.shrink_to_fit();
+            return;
+        }
+        // Walk the list head -> tail, moving each live node into a fresh,
+        // hole-free arena and repointing its index entry at the new slot.
+        let mut compacted: Vec<Slot<K, V>> = Vec::with_capacity(self.len);
+        let mut cur = self.head;
+        let mut prev_new = NIL;
+        while cur != NIL {
+            let next = self.slots[cur].next;
+            let key = self.slots[cur].key.take().expect("occupied slot has a key");
+            let value = self.slots[cur]
+                .value
+                .take()
+                .expect("occupied slot has a value");
+            let new_idx = compacted.len();
+            // Repoint the index at the compacted slot before `key` is moved in.
+            *self.index.get_mut(&key).expect("live key is indexed") = new_idx;
+            compacted.push(Slot {
+                key: Some(key),
+                value: Some(value),
+                prev: prev_new,
+                next: NIL,
+            });
+            if prev_new != NIL {
+                compacted[prev_new].next = new_idx;
+            }
+            prev_new = new_idx;
+            cur = next;
+        }
+        self.head = if compacted.is_empty() { NIL } else { 0 };
+        self.tail = prev_new;
+        self.slots = compacted;
+        self.free = Vec::new();
+        self.index.shrink_to_fit();
     }
 
     /// `true` if `key` is present anywhere in the queue. O(1).
@@ -345,6 +402,10 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
     /// when keys are an invariant (e.g. unique request IDs) and a collision is a
     /// bug, not an update.
     ///
+    /// # Errors
+    /// Returns [`InsertError::DuplicateKey`], carrying the rejected `key` and
+    /// `value`, if `key` is already present in the queue.
+    ///
     /// ```
     /// # use linked_queue::{LinkedQueue, InsertError};
     /// let mut q = LinkedQueue::new();
@@ -368,6 +429,10 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
 
     /// Strict enqueue at the head. O(1). The head-side counterpart of
     /// [`try_push_back`](Self::try_push_back).
+    ///
+    /// # Errors
+    /// Returns [`InsertError::DuplicateKey`], carrying the rejected `key` and
+    /// `value`, if `key` is already present in the queue.
     pub fn try_push_front(&mut self, key: K, value: V) -> Result<(), InsertError<K, V>> {
         if self.index.contains_key(&key) {
             return Err(InsertError::DuplicateKey { key, value });
@@ -547,11 +612,13 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
     }
 
     /// Iterate over the keys from head to tail.
+    #[must_use]
     pub fn keys(&self) -> impl DoubleEndedIterator<Item = &K> {
         self.iter().map(|(k, _)| k)
     }
 
     /// Iterate over the values from head to tail.
+    #[must_use]
     pub fn values(&self) -> impl DoubleEndedIterator<Item = &V> {
         self.iter().map(|(_, v)| v)
     }
@@ -1198,6 +1265,58 @@ mod tests {
         assert_eq!(q.len(), 1000);
     }
 
+    #[test]
+    fn shrink_to_fit_reclaims_and_preserves() {
+        let mut q: LinkedQueue<u32, u32> = LinkedQueue::new();
+        for i in 0..1000 {
+            q.push_back(i, i * 2);
+        }
+        // Punch holes: remove every even key, leaving 500 live nodes scattered
+        // through a 1000-slot arena with a 500-entry free-list.
+        for i in (0..1000).step_by(2) {
+            assert_eq!(q.remove(&i), Some(i * 2));
+        }
+        assert_eq!(q.len(), 500);
+        let before = q.capacity();
+        assert!(before >= 1000, "arena should still hold the high-water mark");
+
+        q.shrink_to_fit();
+
+        // Memory reclaimed down to (about) the live length...
+        assert!(q.capacity() < before, "capacity should shrink: {}", q.capacity());
+        assert!(q.capacity() >= q.len());
+        // ...with order, keys, and values fully intact.
+        let expect: Vec<(u32, u32)> = (0..1000).filter(|i| i % 2 == 1).map(|i| (i, i * 2)).collect();
+        assert_eq!(q.to_vec(), expect);
+        assert_eq!(q.get(&3), Some(&6));
+        assert_eq!(q.get(&4), None);
+        assert_eq!(q.front(), Some((&1, &2)));
+        assert_eq!(q.back(), Some((&999, &1998)));
+
+        // Still fully operational on the compacted arena (links + index remapped).
+        assert_eq!(q.remove(&5), Some(10));
+        q.push_back(4, 40);
+        assert_eq!(q.back(), Some((&4, &40)));
+        q.insert_after(&1, 2, 22).unwrap();
+        assert_eq!(q.get(&2), Some(&22));
+
+        // Empty + shrink reclaims everything.
+        q.clear();
+        q.shrink_to_fit();
+        assert_eq!(q.capacity(), 0);
+        assert!(q.is_empty());
+
+        // Shrink with no holes (free-list empty) just trims spare capacity.
+        let mut q2: LinkedQueue<u32, u32> = LinkedQueue::with_capacity(256);
+        for i in 0..10 {
+            q2.push_back(i, i);
+        }
+        assert!(q2.capacity() >= 256);
+        q2.shrink_to_fit();
+        assert!(q2.capacity() < 256 && q2.capacity() >= 10);
+        assert_eq!(q2.to_vec(), (0..10).map(|i| (i, i)).collect::<Vec<_>>());
+    }
+
     /// Remove the entry for `k` from the model, returning its value if present.
     fn model_remove(model: &mut VecDeque<(u32, u32)>, k: u32) -> Option<u32> {
         model
@@ -1306,6 +1425,13 @@ mod tests {
                     }
                 }
                 _ => {
+                    // Periodically compact the arena and confirm the oracle
+                    // still agrees on every observable afterwards — i.e. that
+                    // shrink_to_fit's index/link renumbering is order- and
+                    // lookup-preserving even on a holey, mid-churn arena.
+                    if step % 500 == 0 {
+                        q.shrink_to_fit();
+                    }
                     assert_eq!(q.len(), model.len(), "step {step}: len");
                     assert_eq!(q.contains(&k), has(&model, k), "step {step}: contains({k})");
                     let fwd: Vec<(u32, u32)> = q.iter().map(|(k, v)| (*k, *v)).collect();
