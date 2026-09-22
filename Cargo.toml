@@ -22,7 +22,10 @@ path = "src/lib.rs"
 [dependencies]
 
 [dev-dependencies]
-proptest = "1.7.0"
+# Keep the declared Rust 1.70 MSRV executable: newer proptest/tempfile resolution
+# can select getrandom 0.4, which requires Rust 1.85 / edition 2024.
+proptest = "=1.7.0"
+tempfile = "=3.20.0"
 
 [badges]
 maintenance = { status = "actively-developed" }
