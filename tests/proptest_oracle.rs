@@ -71,8 +71,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         key.clone().prop_map(Op::MoveToFront),
         (key.clone(), any::<V>()).prop_map(|(k, v)| Op::InsertAfterFront(k, v)),
         (key.clone(), any::<V>()).prop_map(|(k, v)| Op::InsertBeforeBack(k, v)),
-        (any::<usize>(), key.clone(), any::<V>())
-            .prop_map(|(n, k, v)| Op::InsertAfterNth(n, k, v)),
+        (any::<usize>(), key.clone(), any::<V>()).prop_map(|(n, k, v)| Op::InsertAfterNth(n, k, v)),
         (any::<usize>(), key.clone(), any::<V>())
             .prop_map(|(n, k, v)| Op::InsertBeforeNth(n, k, v)),
         (key.clone(), any::<V>()).prop_map(|(k, v)| Op::GetMutSet(k, v)),

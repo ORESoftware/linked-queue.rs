@@ -695,14 +695,21 @@ impl<K: Eq + Hash + Clone, V> LinkedQueue<K, V> {
             seen += 1;
             assert!(seen <= self.len, "list is longer than len (cycle?)");
         }
-        assert_eq!(seen, self.len, "forward walk visited a different count than len");
+        assert_eq!(
+            seen, self.len,
+            "forward walk visited a different count than len"
+        );
         assert_eq!(prev, self.tail, "forward walk did not terminate at tail");
 
         // Free-list: vacant, in range, unique, and accounting closes.
         let mut sorted = self.free.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), self.free.len(), "duplicate slot on the free-list");
+        assert_eq!(
+            sorted.len(),
+            self.free.len(),
+            "duplicate slot on the free-list"
+        );
         for &f in &self.free {
             assert!(f < self.slots.len(), "free index {f} out of range");
             let s = &self.slots[f];
@@ -1360,15 +1367,25 @@ mod tests {
         }
         assert_eq!(q.len(), 500);
         let before = q.capacity();
-        assert!(before >= 1000, "arena should still hold the high-water mark");
+        assert!(
+            before >= 1000,
+            "arena should still hold the high-water mark"
+        );
 
         q.shrink_to_fit();
 
         // Memory reclaimed down to (about) the live length...
-        assert!(q.capacity() < before, "capacity should shrink: {}", q.capacity());
+        assert!(
+            q.capacity() < before,
+            "capacity should shrink: {}",
+            q.capacity()
+        );
         assert!(q.capacity() >= q.len());
         // ...with order, keys, and values fully intact.
-        let expect: Vec<(u32, u32)> = (0..1000).filter(|i| i % 2 == 1).map(|i| (i, i * 2)).collect();
+        let expect: Vec<(u32, u32)> = (0..1000)
+            .filter(|i| i % 2 == 1)
+            .map(|i| (i, i * 2))
+            .collect();
         assert_eq!(q.to_vec(), expect);
         assert_eq!(q.get(&3), Some(&6));
         assert_eq!(q.get(&4), None);
