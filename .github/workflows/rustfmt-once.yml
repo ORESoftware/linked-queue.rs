@@ -1,0 +1,43 @@
+name: rustfmt once
+
+on:
+  push:
+    branches: [hardening/ores-lint-effective-hooks]
+    paths:
+      - 'src/**/*.rs'
+      - 'tests/**/*.rs'
+      - 'Cargo.toml'
+      - '.github/workflows/rustfmt-once.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: hardening/ores-lint-effective-hooks
+          fetch-depth: 1
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Format and commit if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          if git diff --quiet -- src tests; then
+            echo 'rustfmt already clean'
+            exit 0
+          fi
+          git config user.name 'ORESoftware'
+          git config user.email 'alex@oresoftware.com'
+          git add src tests
+          git commit -m 'style: apply rustfmt baseline'
+          git push origin HEAD:hardening/ores-lint-effective-hooks
